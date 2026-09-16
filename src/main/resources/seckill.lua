@@ -1,12 +1,13 @@
+-- 优惠券id
 local voucherId = ARGV[1];
 -- 用户id
 local userId = ARGV[2];
-
+-- 订单id
+local orderId = ARGV[3];
 -- 库存的key
 local stockKey = 'seckill:stock:' .. voucherId;
 -- 订单key
 local orderKey = 'seckill:order:' .. voucherId;
-
 -- 判断库存是否充足 get stockKey > 0 ?
 local stock = redis.call('GET', stockKey);
 if (tonumber(stock) <= 0) then
@@ -24,5 +25,7 @@ end
 redis.call('INCRBY', stockKey, -1);
 -- 集合中添加 userId
 redis.call('SADD', orderKey, userId);
+-- 发送到steam 消息队列
+redis.call('xadd', 'stream.orders', '*', 'userId', userId, 'voucherId', voucherId, 'id', orderId);
 -- 返回0，标识下单成功
 return 0;
