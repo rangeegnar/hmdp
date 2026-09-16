@@ -4,7 +4,6 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.SeckillVoucher;
-import com.hmdp.entity.User;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.VoucherOrderMapper;
 import com.hmdp.service.ISeckillVoucherService;
@@ -139,18 +138,18 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         Long userId = voucherOrder.getUserId();
         Long voucherId = voucherOrder.getVoucherId();
         // 1、判断当前用户是否是第一单
-        int count = this.count(new LambdaQueryWrapper<VoucherOrder>()
-                .eq(VoucherOrder::getUserId, userId));
+        int count = query().eq("user_id", userId).eq("voucher_id", voucherOrder).count();
         if (count >= 1) {
             // 当前用户不是第一单
             log.error("当前用户不是第一单");
             return;
         }
         // 2、用户是第一单，可以下单，秒杀券库存数量减一
-        boolean flag = seckillVoucherService.update(new LambdaUpdateWrapper<SeckillVoucher>()
-                .eq(SeckillVoucher::getVoucherId, voucherId)
-                .gt(SeckillVoucher::getStock, 0)
-                .setSql("stock = stock -1"));
+        boolean flag = seckillVoucherService.update()
+                .setSql("stock = stock - 1")
+                .eq("voucher_id", voucherId)
+                .gt("stock", 0)
+                .update();
         if (!flag) {
             throw new RuntimeException("秒杀券扣减失败");
         }
