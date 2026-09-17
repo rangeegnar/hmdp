@@ -93,7 +93,7 @@ public class UserController {
         return Result.ok(info);
     }
 
-    @GetMapping
+    @GetMapping("/{id}")
     public Result queryUserById(@PathVariable("id") Long userId){
         User user = userService.getById(userId);
         if(user == null){

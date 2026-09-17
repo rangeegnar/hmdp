@@ -198,7 +198,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         Long userId = voucherOrder.getUserId();
         Long voucherId = voucherOrder.getVoucherId();
         // 1、判断当前用户是否是第一单
-        int count = query().eq("user_id", userId).eq("voucher_id", voucherOrder).count();
+        Long count = query().eq("user_id", userId).eq("voucher_id", voucherOrder).count();
         if (count >= 1) {
             // 当前用户不是第一单
             log.error("当前用户不是第一单");
