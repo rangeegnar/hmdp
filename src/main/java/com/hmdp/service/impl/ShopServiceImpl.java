@@ -39,9 +39,33 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Override
     public Result queryById(Long id) {
-        // 用逻辑过期解决缓存击穿
-        Shop shop = clientClient.
-                queryWithLogicalExpire(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        // =========================================================================
+        // 压测与业务方案切换入口（取消对应行的注释即可进行特定压测）
+        // =========================================================================
+
+        // 【基线对照组】：不使用任何缓存，直接查询 MySQL 数据库（用于压测对比基线）
+        // Shop shop = getById(id);
+
+        // 【缓存穿透方案 1】（已启用）：缓存空对象（""）+ 2分钟短 TTL（首次查库回写缓存，保证可查到数据）
+        Shop shop = clientClient.queryWithPassThrough(
+                CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+
+        // 【缓存穿透方案 2】：Redisson 分布式布隆过滤器拦截 + 空值兜底
+        // Shop shop = clientClient.queryWithPassThroughBloom(
+        //         CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES, BLOOM_SHOP_KEY);
+
+        // 【缓存击穿方案 1】：分布式互斥锁 + 自旋重试 + Double Check（CP 强一致性）
+        // Shop shop = clientClient.queryWithMutex(
+        //         CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+
+        // 【缓存击穿方案 2】：逻辑过期时间 + 独立线程池异步重建（AP 高吞吐毫秒级响应，需提前预热）
+        // Shop shop = clientClient.queryWithLogicalExpire(
+        //         CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+
+        // 【缓存雪崩方案 1】：TTL 随机 Jitter 扰动打散 + Redis 宕机容灾降级
+        // Shop shop = clientClient.queryWithAvalanchePrevention(
+        //         CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, 300L, TimeUnit.SECONDS);
+
         if (shop == null) {
             return Result.fail("店铺不存在！");
         }

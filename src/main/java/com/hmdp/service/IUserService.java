@@ -20,4 +20,10 @@ public interface IUserService extends IService<User> {
     Result loginWithPassword(LoginFormDTO loginFormDTO, HttpSession session);
 
     Result logout(String token);
+
+    Result kickAll(Long userId);
+
+    Result kickDevice(String token);
+
+    Result getOnlineDevices();
 }

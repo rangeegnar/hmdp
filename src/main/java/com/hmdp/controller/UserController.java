@@ -66,6 +66,34 @@ public class UserController {
         return Result.ok(user);
     }
 
+    /**
+     * 查看当前账号在线设备列表
+     */
+    @GetMapping("/devices")
+    public Result getOnlineDevices(){
+        return userService.getOnlineDevices();
+    }
+
+    /**
+     * 下线指定设备
+     */
+    @PostMapping("/devices/kick")
+    public Result kickDevice(@RequestParam("token") String token){
+        return userService.kickDevice(token);
+    }
+
+    /**
+     * 强制当前账号所有设备全端下线（如修改密码后调用）
+     */
+    @PostMapping("/kickAll")
+    public Result kickAll(){
+        UserDTO user = UserHolder.getUser();
+        if (user == null || user.getId() == null) {
+            return Result.fail("用户未登录");
+        }
+        return userService.kickAll(user.getId());
+    }
+
     @GetMapping("/info/{id}")
     public Result info(@PathVariable("id") Long userId){
         // 查询详情

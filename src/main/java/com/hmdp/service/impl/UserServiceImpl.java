@@ -22,14 +22,15 @@ import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import org.springframework.data.redis.core.ZSetOperations;
+
 import javax.annotation.Resource;
 import javax.servlet.http.HttpSession;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 
 @Service
@@ -83,7 +84,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         //3.校验验证码
         String cacheCode = stringRedisTemplate.opsForValue().get(RedisConstants.LOGIN_CODE_KEY+phone);
         if(cacheCode==null||!cacheCode.equals(code)){
-           return Result.fail("验证码不一致，请重新输入");
+           return Result.fail(ErrorConstants.CODE_INVALID);
        }
 
         //4.一致，根据手机号查询用户
@@ -137,29 +138,49 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     }
 
     /**
-     * 统一生成 Token 并保存 UserDTO 到 Redis
+     * 统一生成 Token 并保存 UserDTO 到 Redis（支持多设备管控与超量踢出）
      */
     private Result createTokenAndSaveUser(User user) {
-        // 1. 生成随机 Token 作为登录令牌
+        Long userId = user.getId();
+        String userTokensKey = RedisConstants.LOGIN_USER_TOKENS_KEY + userId;
+
+        // 1. 检查当前在线设备数：如果超出最大限制，剔除最早登录的设备（Score 最小）
+        Long count = stringRedisTemplate.opsForZSet().zCard(userTokensKey);
+        if (count != null && count >= RedisConstants.MAX_ONLINE_DEVICES) {
+            Set<String> oldestTokens = stringRedisTemplate.opsForZSet().range(userTokensKey, 0, 0);
+            if (oldestTokens != null && !oldestTokens.isEmpty()) {
+                String oldestToken = oldestTokens.iterator().next();
+                // 销毁旧设备的登录态（强制踢下线）
+                stringRedisTemplate.delete(RedisConstants.LOGIN_USER_KEY + oldestToken);
+                stringRedisTemplate.opsForZSet().remove(userTokensKey, oldestToken);
+                log.info("用户 [{}] 在线设备数达到上限 {}，已自动将最早登录的设备 [{}] 踢下线",
+                        userId, RedisConstants.MAX_ONLINE_DEVICES, oldestToken);
+            }
+        }
+
+        // 2. 生成随机 Token 作为当前设备的登录令牌
         String token = UUID.randomUUID().toString(true);
 
-        // 2. 将 User 转为 UserDTO
+        // 3. 将 User 转为 UserDTO
         UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
 
-        // 3. 将 UserDTO 转为 Map，确保 value 为 String 类型以适配 StringRedisTemplate
+        // 4. 将 UserDTO 转为 Map，确保 value 为 String 类型以适配 StringRedisTemplate
         Map<String, Object> userMap = BeanUtil.beanToMap(userDTO, new HashMap<>(),
                 CopyOptions.create()
                         .setIgnoreNullValue(true)
                         .setFieldValueEditor((fieldName, fieldValue) -> fieldValue != null ? fieldValue.toString() : null));
 
-        // 4. 保存到 Redis (Hash 结构)
+        // 5. 保存 Token 详情到 Redis (Hash 结构)，并设置 30 分钟有效期
         String tokenKey = RedisConstants.LOGIN_USER_KEY + token;
         stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
-
-        // 5. 设置有效期（30分钟）
         stringRedisTemplate.expire(tokenKey, RedisConstants.LOGIN_USER_TTL, TimeUnit.MINUTES);
 
-        // 6. 返回 Token
+        // 6. 将新 Token 登记到用户的设备集合中（Score 为当前登录时间戳），并设置集合兜底过期时间
+        long now = System.currentTimeMillis();
+        stringRedisTemplate.opsForZSet().add(userTokensKey, token, (double) now);
+        stringRedisTemplate.expire(userTokensKey, RedisConstants.LOGIN_USER_TOKENS_TTL, TimeUnit.DAYS);
+
+        // 7. 返回 Token
         return Result.ok(token);
     }
 
@@ -169,10 +190,95 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             if (token.startsWith("Bearer ")) {
                 token = token.substring(7);
             }
+            // 1. 删除当前设备的 Token
             stringRedisTemplate.delete(RedisConstants.LOGIN_USER_KEY + token);
+            // 2. 从用户的设备集合中移除当前 Token
+            UserDTO user = UserHolder.getUser();
+            if (user != null && user.getId() != null) {
+                stringRedisTemplate.opsForZSet().remove(RedisConstants.LOGIN_USER_TOKENS_KEY + user.getId(), token);
+            }
         }
         UserHolder.removeUser();
         return Result.ok();
+    }
+
+    @Override
+    public Result kickAll(Long userId) {
+        if (userId == null) {
+            return Result.fail("用户ID不能为空");
+        }
+        String userTokensKey = RedisConstants.LOGIN_USER_TOKENS_KEY + userId;
+        // 1. 获取该用户所有在线设备的 Token
+        Set<String> tokens = stringRedisTemplate.opsForZSet().range(userTokensKey, 0, -1);
+        if (tokens != null && !tokens.isEmpty()) {
+            List<String> keys = tokens.stream()
+                    .map(t -> RedisConstants.LOGIN_USER_KEY + t)
+                    .collect(Collectors.toList());
+            // 2. 批量删除所有设备的 Token 详情
+            stringRedisTemplate.delete(keys);
+        }
+        // 3. 删除用户设备集合
+        stringRedisTemplate.delete(userTokensKey);
+        UserHolder.removeUser();
+        return Result.ok("已成功将该账号的所有设备强制下线");
+    }
+
+    @Override
+    public Result kickDevice(String token) {
+        if (StrUtil.isBlank(token)) {
+            return Result.fail("Token不能为空");
+        }
+        if (token.startsWith("Bearer ")) {
+            token = token.substring(7);
+        }
+        // 1. 删除该设备的 Token
+        stringRedisTemplate.delete(RedisConstants.LOGIN_USER_KEY + token);
+        // 2. 从该用户的设备集合中移除
+        UserDTO user = UserHolder.getUser();
+        if (user != null && user.getId() != null) {
+            stringRedisTemplate.opsForZSet().remove(RedisConstants.LOGIN_USER_TOKENS_KEY + user.getId(), token);
+        }
+        return Result.ok("指定设备已成功下线");
+    }
+
+    @Override
+    public Result getOnlineDevices() {
+        UserDTO user = UserHolder.getUser();
+        if (user == null || user.getId() == null) {
+            return Result.fail("用户未登录");
+        }
+        String userTokensKey = RedisConstants.LOGIN_USER_TOKENS_KEY + user.getId();
+        // 获取所有设备 Token 及其登录时间戳
+        Set<ZSetOperations.TypedTuple<String>> tuples = stringRedisTemplate.opsForZSet().rangeWithScores(userTokensKey, 0, -1);
+        if (tuples == null || tuples.isEmpty()) {
+            return Result.ok(Collections.emptyList());
+        }
+
+        List<Map<String, Object>> deviceList = new ArrayList<>();
+        List<String> expiredTokens = new ArrayList<>();
+
+        for (ZSetOperations.TypedTuple<String> tuple : tuples) {
+            String token = tuple.getValue();
+            Double score = tuple.getScore();
+            // 校验 token 在 Redis 是否依然存活
+            Boolean exists = stringRedisTemplate.hasKey(RedisConstants.LOGIN_USER_KEY + token);
+            if (Boolean.TRUE.equals(exists)) {
+                Map<String, Object> device = new HashMap<>();
+                device.put("token", token);
+                device.put("loginTime", score != null ? score.longValue() : null);
+                deviceList.add(device);
+            } else {
+                // 已自然过期的僵尸 Token，收集起来统一清理
+                expiredTokens.add(token);
+            }
+        }
+
+        // 惰性移除已失效的僵尸 Token，保持 ZSet 干净
+        if (!expiredTokens.isEmpty()) {
+            stringRedisTemplate.opsForZSet().remove(userTokensKey, expiredTokens.toArray());
+        }
+
+        return Result.ok(deviceList);
     }
 
     @Override
