@@ -6,10 +6,10 @@ public interface ILock {
      * @param timeoutSec
      * @return
      */
-    boolean tryLock(long timeoutSec);
+     boolean tryLock(long timeoutSec);
 
     /**
      * 释放锁
      */
-    void unlock();
+    void delLock();
 }

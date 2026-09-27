@@ -14,16 +14,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
 
-/**
- * <p>
- * 前端控制器
- * </p>
- *
- * @author 虎哥
- * @since 2021-12-22
- */
 @Slf4j
 @RestController
 @RequestMapping("/user")
@@ -38,9 +31,8 @@ public class UserController {
     /**
      * 发送手机验证码
      */
-    @PostMapping("code")
+    @PostMapping("/code")
     public Result sendCode(@RequestParam("phone") String phone, HttpSession session) {
-        // 发送短信验证码并保存验证码
         return userService.sendCode(phone, session);
     }
 
@@ -50,8 +42,12 @@ public class UserController {
      */
     @PostMapping("/login")
     public Result login(@RequestBody LoginFormDTO loginForm, HttpSession session){
-        // 实现登录功能
         return userService.login(loginForm, session);
+    }
+
+    @PostMapping("/loginWithPassword")
+    public Result loginWithPassword(@RequestBody LoginFormDTO loginFormDTO, HttpSession session){
+        return userService.loginWithPassword(loginFormDTO, session);
     }
 
     /**
@@ -59,26 +55,17 @@ public class UserController {
      * @return 无
      */
     @PostMapping("/logout")
-    public Result logout(){
-        // TODO 实现登出功能
-        return Result.fail("功能未完成");
-    }
-    /**
-     * 获取当前登录用户信息
-     * @return
-     */
-    @GetMapping("/me")
-    public Result me(){
-        // 获取当前登录的用户并返回
-        UserDTO userDTO = UserHolder.getUser();
-        return Result.ok(userDTO);
+    public Result logout(HttpServletRequest request){
+        String token = request.getHeader("authorization");
+        return userService.logout(token);
     }
 
-    /**
-     * 获取当前登录用户的信息
-     * @param userId
-     * @return
-     */
+    @GetMapping("/me")
+    public Result me(){
+        UserDTO user = UserHolder.getUser();
+        return Result.ok(user);
+    }
+
     @GetMapping("/info/{id}")
     public Result info(@PathVariable("id") Long userId){
         // 查询详情
@@ -95,11 +82,30 @@ public class UserController {
 
     @GetMapping("/{id}")
     public Result queryUserById(@PathVariable("id") Long userId){
+        //查询详情
         User user = userService.getById(userId);
-        if(user == null){
+        if(user==null){
             return Result.ok();
         }
         UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
         return Result.ok(userDTO);
+    }
+
+    /**
+     * 签到功能
+     * @return
+     */
+    @PostMapping("/sign")
+    public Result sign(){
+        return userService.sign();
+    }
+
+    /**
+     * 统计连续签到
+     * @return
+     */
+    @GetMapping("/sign/count")
+    public Result signCount(){
+        return userService.signCount();
     }
 }
