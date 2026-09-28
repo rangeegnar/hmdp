@@ -46,13 +46,13 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         // 【基线对照组】：不使用任何缓存，直接查询 MySQL 数据库（用于压测对比基线）
         // Shop shop = getById(id);
 
-        // 【缓存穿透方案 1】（已启用）：缓存空对象（""）+ 2分钟短 TTL（首次查库回写缓存，保证可查到数据）
-        Shop shop = clientClient.queryWithPassThrough(
-                CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        // 【缓存穿透方案 1】：缓存空对象（""）+ 2分钟短 TTL（首次查库回写缓存，保证可查到数据）
+        // Shop shop = clientClient.queryWithPassThrough(
+        //         CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
 
         // 【缓存穿透方案 2】：Redisson 分布式布隆过滤器拦截 + 空值兜底
-        // Shop shop = clientClient.queryWithPassThroughBloom(
-        //         CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES, BLOOM_SHOP_KEY);
+        Shop shop = clientClient.queryWithPassThroughBloom(
+                 CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES, BLOOM_SHOP_KEY);
 
         // 【缓存击穿方案 1】：分布式互斥锁 + 自旋重试 + Double Check（CP 强一致性）
         // Shop shop = clientClient.queryWithMutex(
