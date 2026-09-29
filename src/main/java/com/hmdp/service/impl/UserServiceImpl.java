@@ -5,6 +5,11 @@ import cn.hutool.core.bean.copier.CopyOptions;
 import cn.hutool.core.lang.UUID;
 import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONArray;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.constant.ErrorConstants;
 import com.hmdp.constant.RedisConstants;
@@ -22,8 +27,6 @@ import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
-import org.springframework.data.redis.core.ZSetOperations;
-
 import javax.annotation.Resource;
 import javax.servlet.http.HttpSession;
 import java.time.LocalDateTime;
@@ -39,6 +42,19 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    //Lua 脚本：查询在线设备并原子清理僵尸 token（getOnlineDevices.lua）
+    private static final DefaultRedisScript<String> ONLINE_DEVICES_SCRIPT = new DefaultRedisScript<>();
+    // Lua 脚本：登录超量踢出 + 登记设备（loginTokenKick.lua）
+    private static final DefaultRedisScript<String> LOGIN_TOKEN_KICK_SCRIPT = new DefaultRedisScript<>();
+
+    static {
+        ONLINE_DEVICES_SCRIPT.setLocation(new ClassPathResource("getOnlineDevices.lua"));
+        ONLINE_DEVICES_SCRIPT.setResultType(String.class);
+
+        LOGIN_TOKEN_KICK_SCRIPT.setLocation(new ClassPathResource("loginTokenKick.lua"));
+        LOGIN_TOKEN_KICK_SCRIPT.setResultType(String.class);
+    }
     /**
      * 发送验证码
      * @param phone
@@ -144,43 +160,39 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         Long userId = user.getId();
         String userTokensKey = RedisConstants.LOGIN_USER_TOKENS_KEY + userId;
 
-        // 1. 检查当前在线设备数：如果超出最大限制，剔除最早登录的设备（Score 最小）
-        Long count = stringRedisTemplate.opsForZSet().zCard(userTokensKey);
-        if (count != null && count >= RedisConstants.MAX_ONLINE_DEVICES) {
-            Set<String> oldestTokens = stringRedisTemplate.opsForZSet().range(userTokensKey, 0, 0);
-            if (oldestTokens != null && !oldestTokens.isEmpty()) {
-                String oldestToken = oldestTokens.iterator().next();
-                // 销毁旧设备的登录态（强制踢下线）
-                stringRedisTemplate.delete(RedisConstants.LOGIN_USER_KEY + oldestToken);
-                stringRedisTemplate.opsForZSet().remove(userTokensKey, oldestToken);
-                log.info("用户 [{}] 在线设备数达到上限 {}，已自动将最早登录的设备 [{}] 踢下线",
-                        userId, RedisConstants.MAX_ONLINE_DEVICES, oldestToken);
-            }
-        }
-
-        // 2. 生成随机 Token 作为当前设备的登录令牌
+        // 1. 生成随机 Token 作为当前设备的登录令牌
         String token = UUID.randomUUID().toString(true);
 
-        // 3. 将 User 转为 UserDTO
+        // 2. 将 User 转为 UserDTO
         UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
 
-        // 4. 将 UserDTO 转为 Map，确保 value 为 String 类型以适配 StringRedisTemplate
+        // 3. 将 UserDTO 转为 Map，确保 value 为 String 类型以适配 StringRedisTemplate
         Map<String, Object> userMap = BeanUtil.beanToMap(userDTO, new HashMap<>(),
                 CopyOptions.create()
                         .setIgnoreNullValue(true)
                         .setFieldValueEditor((fieldName, fieldValue) -> fieldValue != null ? fieldValue.toString() : null));
 
-        // 5. 保存 Token 详情到 Redis (Hash 结构)，并设置 30 分钟有效期
+        // 4. 保存 Token 详情到 Redis (Hash 结构)，并设置 30 分钟有效期
         String tokenKey = RedisConstants.LOGIN_USER_KEY + token;
         stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
         stringRedisTemplate.expire(tokenKey, RedisConstants.LOGIN_USER_TTL, TimeUnit.MINUTES);
 
-        // 6. 将新 Token 登记到用户的设备集合中（Score 为当前登录时间戳），并设置集合兜底过期时间
+        // 5. 原子执行 Lua：超量自动踢出最早设备 + 登记新 Token + 设备集合兜底过期 zCard 检查 / range 取旧 / delete 三步
         long now = System.currentTimeMillis();
-        stringRedisTemplate.opsForZSet().add(userTokensKey, token, (double) now);
-        stringRedisTemplate.expire(userTokensKey, RedisConstants.LOGIN_USER_TOKENS_TTL, TimeUnit.DAYS);
+        String kicked = stringRedisTemplate.execute(
+                LOGIN_TOKEN_KICK_SCRIPT,
+                Collections.singletonList(userTokensKey),
+                String.valueOf(RedisConstants.MAX_ONLINE_DEVICES),
+                token,
+                RedisConstants.LOGIN_USER_KEY,
+                String.valueOf(now),
+                String.valueOf(TimeUnit.DAYS.toSeconds(RedisConstants.LOGIN_USER_TOKENS_TTL)));
+        if (StrUtil.isNotBlank(kicked)) {
+            log.info("用户 [{}] 在线设备数达到上限 {}，已自动将最早登录的设备 [{}] 踢下线",
+                    userId, RedisConstants.MAX_ONLINE_DEVICES, kicked);
+        }
 
-        // 7. 返回 Token
+        // 6. 返回 Token
         return Result.ok(token);
     }
 
@@ -248,34 +260,30 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             return Result.fail("用户未登录");
         }
         String userTokensKey = RedisConstants.LOGIN_USER_TOKENS_KEY + user.getId();
-        // 获取所有设备 Token 及其登录时间戳
-        Set<ZSetOperations.TypedTuple<String>> tuples = stringRedisTemplate.opsForZSet().rangeWithScores(userTokensKey, 0, -1);
-        if (tuples == null || tuples.isEmpty()) {
+
+        // 原子执行 Lua：一次往返完成「取全部设备 + 批量判断存活 + 惰性清理僵尸 token」
+        String json = stringRedisTemplate.execute(
+                ONLINE_DEVICES_SCRIPT,
+                Collections.singletonList(userTokensKey),
+                RedisConstants.LOGIN_USER_KEY);
+        if (StrUtil.isBlank(json)) {
             return Result.ok(Collections.emptyList());
         }
 
-        List<Map<String, Object>> deviceList = new ArrayList<>();
-        List<String> expiredTokens = new ArrayList<>();
-
-        for (ZSetOperations.TypedTuple<String> tuple : tuples) {
-            String token = tuple.getValue();
-            Double score = tuple.getScore();
-            // 校验 token 在 Redis 是否依然存活
-            Boolean exists = stringRedisTemplate.hasKey(RedisConstants.LOGIN_USER_KEY + token);
-            if (Boolean.TRUE.equals(exists)) {
-                Map<String, Object> device = new HashMap<>();
-                device.put("token", token);
-                device.put("loginTime", score != null ? score.longValue() : null);
-                deviceList.add(device);
-            } else {
-                // 已自然过期的僵尸 Token，收集起来统一清理
-                expiredTokens.add(token);
-            }
+        // 解析 Lua 返回的 JSON：{"deviceList":[["token",loginTime],...],"expiredTokens":["token",...]}
+        JSONObject jsonObject = JSONUtil.parseObj(json);
+        JSONArray deviceArray = jsonObject.getJSONArray("deviceList");
+        if (deviceArray == null || deviceArray.isEmpty()) {
+            return Result.ok(Collections.emptyList());
         }
 
-        // 惰性移除已失效的僵尸 Token，保持 ZSet 干净
-        if (!expiredTokens.isEmpty()) {
-            stringRedisTemplate.opsForZSet().remove(userTokensKey, expiredTokens.toArray());
+        List<Map<String, Object>> deviceList = new ArrayList<>(deviceArray.size());
+        for (Object item : deviceArray) {
+            JSONArray device = (JSONArray) item;
+            Map<String, Object> map = new HashMap<>();
+            map.put("token", device.getStr(0));
+            map.put("loginTime", device.getLong(1));
+            deviceList.add(map);
         }
 
         return Result.ok(deviceList);

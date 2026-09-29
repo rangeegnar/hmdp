@@ -18,7 +18,7 @@ import java.util.List;
 import static com.hmdp.constant.RedisConstants.SECKILL_STOCK_KEY;
 
 @Service
-public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> implements IVoucherService {
+public class    VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> implements IVoucherService {
 
     @Resource
     private ISeckillVoucherService seckillVoucherService;
