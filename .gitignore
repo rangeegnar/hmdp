@@ -1,4 +1,3 @@
-HELP.md
 target/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
@@ -31,3 +30,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# 解压/反编译产物,不入库
+org/
+META-INF/

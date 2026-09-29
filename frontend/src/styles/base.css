@@ -1,0 +1,31 @@
+/* 全局基础样式(补充 App.vue 之外的细节) */
+.page-enter-active,
+.page-leave-active {
+  transition: opacity 0.15s ease;
+}
+.page-enter-from,
+.page-leave-to {
+  opacity: 0;
+}
+
+/* 统一卡片内链接 hover */
+.el-card {
+  border-radius: 12px;
+}
+
+/* Element Plus 主色微调:跟随品牌紫 */
+.el-button--primary {
+  --el-button-bg-color: #4f46e5;
+  --el-button-border-color: #4f46e5;
+  --el-button-hover-bg-color: #6d6af7;
+  --el-button-hover-border-color: #6d6af7;
+  --el-button-active-bg-color: #4338ca;
+  --el-button-active-border-color: #4338ca;
+}
+.el-button--primary.is-plain {
+  --el-button-bg-color: #eef0ff;
+  --el-button-border-color: #c7cbff;
+  --el-button-text-color: #4f46e5;
+  --el-button-hover-bg-color: #4f46e5;
+  --el-button-hover-text-color: #fff;
+}
